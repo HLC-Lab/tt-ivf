@@ -1,0 +1,56 @@
+# Runtime sources/libraries remain in the external TT-Metal checkout.
+/dependencies/*
+# Pinned runtime fetched and built by setup_tt_metal.sh.
+/third_party/
+!/dependencies/CMakeLists.txt
+/.venv/
+/.cache/
+/.runtime/
+# build.sh links build -> build_Release; match the link as well as a folder.
+/build
+/build_*/
+/built/
+/.cpmcache/
+/.logs/
+/generated/
+/runtime/
+/python_env/
+/venv/
+/data/*
+!/data/README.md
+/results/*
+!/results/README.md
+
+# Datasets and trained centroids.
+/*.hdf5
+/*_train.bin
+/*_queries.bin
+/*_neighbors.bin
+/*_distances.bin
+/centroids-*.bin
+/centroids-*.npy
+
+# Measurement outputs stay local. Raw data is distributed separately.
+/energy_raw/
+/memcopy_results/
+/similarity_*/
+/union_results/
+/fine_reader_profiles/
+/*.csv
+/*.log
+/*.png
+/*.pdf
+/*.svg
+/results_*.txt
+/core
+/core.*
+/*.tar.gz
+/*.zip
+/tt_metal.lock.json.before-*
+/requirements-local*.txt
+/self_contained*.json
+
+__pycache__/
+*.pyc
+*.tracy
+.DS_Store

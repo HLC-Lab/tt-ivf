@@ -1,0 +1,20 @@
+{
+  "repository": "https://github.com/tenstorrent/tt-metal.git",
+  "upstream_repository": "https://github.com/tenstorrent/tt-metal.git",
+  "commit": "e7c251da3bf626fa9a74b790f71612ff1ed573bf",
+  "describe": "v0.66.0",
+  "submodules": [
+    {
+      "path": "tt_metal/third_party/tracy",
+      "commit": "0aaefbb689b4c60694edc905545fc4709fd13f6a"
+    },
+    {
+      "path": "tt_metal/third_party/tt_llk",
+      "commit": "1d543f8c5edf850dfaca95d76c6543652df8c588"
+    },
+    {
+      "path": "tt_metal/third_party/umd",
+      "commit": "19a69fca8c7f09f441e28b0bdfd47eb0ed9fe417"
+    }
+  ]
+}

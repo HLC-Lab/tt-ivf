@@ -1,0 +1,4 @@
+numpy
+h5py
+matplotlib
+# For the optional CPU baseline: pip install faiss-cpu
