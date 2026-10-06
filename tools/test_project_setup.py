@@ -386,6 +386,9 @@ int main() {
                                check=True)
                 (umd / 'CMakeLists.txt').write_text('# umd local edit\n')
                 (original / 'tt_metal/runtime.cpp').write_text('// host runtime edit\n')
+                # A new file staged on the host is part of `git diff HEAD` there.
+                (original / 'tt_metal/added.cpp').write_text('// staged new file\n')
+                subprocess.run(['git', '-C', str(original), 'add', 'tt_metal/added.cpp'], check=True)
                 (project / 'tt_metal.lock.json').write_text(json.dumps(
                     {'commit': '0' * 40, 'describe': 'export', 'submodules': []}))
                 lock = use_checkout(original, project, record_local_changes=True)
@@ -395,6 +398,7 @@ int main() {
                 fetch(copy, lock, project)
             check(copy, lock)
             self.assertEqual((copy / 'tt_metal/runtime.cpp').read_text(), '// host runtime edit\n')
+            self.assertEqual((copy / 'tt_metal/added.cpp').read_text(), '// staged new file\n')
             self.assertEqual((copy / 'tt_metal/third_party/umd/CMakeLists.txt').read_text(), '# umd local edit\n')
             # The original host checkout is not needed after the fetch.
             shutil.rmtree(original)
