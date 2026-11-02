@@ -1,0 +1,140 @@
+% High-level overview of the IVF search with per-list query blocks and two passes
+% (ann_ivf_ttaiss), drawn as a host/device timeline.
+% Requires: \usepackage{tikz,amsmath,xcolor}
+%           \usetikzlibrary{calc,arrows.meta}
+\providecolor{hostc}{RGB}{214,228,240}
+\providecolor{devc}{RGB}{226,236,214}
+
+% Background (optional; can be moved to the section text).
+\paragraph{Background: IVF search.} The goal of approximate nearest-neighbour
+(ANN) search is to find, for every query vector, the \(k\) dataset vectors most
+similar to it; we use \(k = 10\) and cosine similarity (inner product of
+L2-normalised vectors). An inverted-file (IVF) index avoids comparing each query
+with the whole dataset. K-means splits the dataset into \(N_{\mathrm{list}}\)
+clusters; each cluster has a centroid and a list of the vectors closest to it.
+A query is first compared with the \(N_{\mathrm{list}}\) centroids (coarse
+search). Then only the vectors of its \(N_{\mathrm{probe}}\) closest clusters are
+scanned (fine search), and the best \(k\) of them are returned. A larger
+\(N_{\mathrm{probe}}\) scans more vectors and gives a higher recall (the fraction
+of the true 10 nearest neighbours found). Our experiments use GloVe-100
+(1{,}183{,}514 vectors of dimension 100) with \(N_{\mathrm{list}} = 512\) and
+\(N_{\mathrm{probe}} = 64\), and search batches of 10{,}000 queries. Each query
+then scans 64 of the 512 clusters, one eighth of them.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[font=\small,
+  hostbox/.style={draw,rounded corners=4pt,fill=hostc,align=left,text width=5.0cm,inner sep=5pt},
+  devbox/.style={draw,rounded corners=4pt,fill=devc,thick,align=left,text width=5.6cm,inner sep=5pt},
+  arr/.style={-{Stealth[length=2mm]},thick},
+  lbl/.style={font=\scriptsize,fill=white,inner sep=1pt,align=center}]
+% lane centres
+\coordinate (hx) at (0,0);
+\coordinate (dx) at (8.2,0);
+% context
+\node[draw,rounded corners=4pt,fill=gray!8,align=left,text width=13.6cm,inner sep=6pt,anchor=south]
+  (ctx) at (4.1,1.3) {%
+  \textbf{Goal:} for every query, the \(k=10\) most similar dataset vectors (cosine similarity).\\
+  \textbf{IVF index:} k-means splits the dataset into \(N_{\mathrm{list}}\) clusters (centroid + list of vectors).\\
+  \textbf{Search:} compare the query with the centroids, scan only the vectors of its \(N_{\mathrm{probe}}\)
+  closest clusters, keep the best \(k\).\\
+  \textbf{Here:} GloVe-100 (1.18\,M vectors, \(d=100\)), \(N_{\mathrm{list}}=512\), \(N_{\mathrm{probe}}=64\),
+  batches of 10{,}000 queries.};
+\node[font=\bfseries] at (0,0.8) {Host (CPU)};
+\node[font=\bfseries] at (8.2,0.8) {Device (Tenstorrent, 64 cores)};
+
+% 1. index, once
+\node[hostbox,anchor=north] (h1) at (hx) {%
+  \textbf{1. Once:} upload the index\\
+  (centroids, cluster vectors + IDs)};
+\node[devbox,anchor=north] (d1) at (dx |- h1.north) {%
+  Index kept in device memory\\for all searches};
+\draw[arr] (h1.east) -- (d1.west);
+
+% 2. queries
+\node[hostbox,anchor=north] (h2) at ($(hx |- h1.south)+(0,-0.6)$) {%
+  \textbf{2. Per search:} upload the queries};
+
+% 3. coarse search
+\node[devbox,anchor=north] (d3) at ($(dx |- h2.south)+(0,-0.3)$) {%
+  \textbf{3. Coarse search}\\
+  queries \(\times\) centroids; keep the closest\\
+  centroids of each query (top-64)};
+\draw[arr] (h2.east) -- node[lbl,above,sloped]{queries} (d3.west);
+
+% 4. plan pass 1
+\node[hostbox,anchor=north] (h4) at ($(hx |- d3.south)+(0,-0.3)$) {%
+  \textbf{4. Plan}\\[2pt]
+  \textbullet\ keep the \(N_{\mathrm{probe}}\) closest clusters of each query\\
+  \textbullet\ pass 1 = its \(N_{\mathrm{probe}}/8\) closest clusters (8 for\\
+  \hspace*{0.8em}\(N_{\mathrm{probe}}=64\)), pass 2 = the others\\
+  \textbullet\ for every cluster, put the queries that\\
+  \hspace*{0.8em}probe it in blocks of \(\le 32\)\\[2pt]
+  \emph{Example:} q1 and q2 both probe \(C_3\)\\
+  \(\rightarrow\) \(C_3\) gets the block \(\{q_1, q_2, \ldots\}\)};
+\draw[arr] (d3.west) -- node[lbl,above,sloped]{closest clusters} (h4.east);
+
+% 5. pass 1
+\node[devbox,anchor=north] (d5) at ($(dx |- h4.south)+(0,-0.3)$) {%
+  \textbf{5. Pass 1} (each query's 8 closest clusters)\\[2pt]
+  for every cluster: read its vectors once for\\
+  up to 32 of its query blocks, multiply them\\
+  with each block \(\rightarrow\) top-32 of each query\\
+  \emph{inside} that cluster\\[2pt]
+  merge the 8 lists of each query \(\rightarrow\) saved:\\
+  \emph{pass-1 result} = top-32 over its 8 clusters\\
+  bound \(T_q\) = 10th best score of that result};
+\draw[arr] (h4.east) -- node[lbl,above,sloped]{blocks (query IDs)} (d5.west);
+
+% 6. plan pass 2, in parallel with pass 1
+\node[hostbox,anchor=north] (h6) at (hx |- d5.north) {%
+  \textbf{6. Plan pass 2} for the other clusters\\
+  (while the device runs pass 1)};
+
+% 7. pass 2
+\node[devbox,anchor=north] (d7) at ($(dx |- d5.south)+(0,-0.6)$) {%
+  \textbf{7. Pass 2} (the other clusters)\\[2pt]
+  same as pass 1, but for each 32 vectors \(\times\)\\
+  query block the scores are computed and\\
+  the top-32 update is skipped when no score\\
+  beats the bound \(T_q\) of its query\\[2pt]
+  saved: one top-32 list per (query, cluster),\\
+  \emph{not merged yet}; empty if all skipped};
+\draw[arr] (d5.south) -- node[lbl,right]{\(T_q\)} (d7.north);
+\draw[arr] (h6.east) -- node[lbl,above,sloped]{pass-2 blocks} (d7.west);
+
+% 8. final top-k
+\node[devbox,anchor=north] (d8) at ($(dx |- d7.south)+(0,-0.6)$) {%
+  \textbf{8. Final top-32 per query}\\[2pt]
+  \texttt{for each query q (32 at a time):}\\
+  \texttt{\ \ best = pass-1 result of q}\\
+  \texttt{\ \ for each pass-2 cluster j of q:}\\
+  \texttt{\ \ \ \ best = top32(best} \(\cup\) \texttt{list of q in j)}\\[2pt]
+  \(\rightarrow\) top-32 of q over all its \(N_{\mathrm{probe}}\) clusters};
+\draw[arr] (d7.south) -- (d8.north);
+
+% 9. results
+\node[hostbox,anchor=north] (h9) at ($(hx |- d8.south)+(0,-0.3)$) {%
+  \textbf{9. Results}\\
+  read the top-32 of each query;\\
+  optional FP32 re-ranking;\\
+  return the top-10};
+\draw[arr] (d8.west) -- node[lbl,above,sloped]{top-32} (h9.east);
+
+% lane separator
+\draw[dashed,gray] (4.1,1.0) -- (4.1,0 |- h9.south);
+\end{tikzpicture}}
+\caption{Overview of one search for the \(k=10\) nearest neighbours of every
+query in a batch. The index is uploaded once. For each batch
+of queries, the device finds the closest clusters of every query (coarse
+search); the host groups the queries by cluster, so that each cluster is read
+once and multiplied with blocks of the queries that need it. Pass 1 searches
+each query's closest clusters and gives a bound \(T_q\); pass 2 searches the
+remaining clusters and skips the blocks that cannot beat that bound. A final
+top-32 merge combines all results per query; the host returns the top-10
+(after an optional FP32 re-ranking). With re-ranking, \(T_q\) is the 32nd best
+score instead of the 10th. Below \(N_{\mathrm{probe}}=24\) there is a single pass
+over all \(N_{\mathrm{probe}}\) clusters, followed by the final merge.}
+\label{fig:gf-overview}
+\end{figure}

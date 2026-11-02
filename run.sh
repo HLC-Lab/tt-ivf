@@ -8,7 +8,7 @@ fi
 example="$1"
 shift
 case "$example" in
-    ann_ivf_mem_log|ann_ivf_energy|ann_ivf_similarity_partitioned) ;;
+    ann_ivf_mem_log|ann_ivf_energy|ann_ivf_ttaiss) ;;
     *) echo "Unknown ANN target: $example" >&2; exit 1 ;;
 esac
 source "$project_root/env.sh" ""

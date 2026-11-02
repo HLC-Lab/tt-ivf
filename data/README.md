@@ -13,7 +13,7 @@ data/
     └── centroids-glove-100-angular-512.bin
 ```
 
-All three TT benchmarks use this layout; `--dataset` remains the dataset name.
+All TT executables use this layout; `--dataset` remains the dataset name.
 `ANN_DATA_DIR` selects another root containing `datasets/` and `centroids/`.
 FAISS reads HDF5 here and writes trained centroids to `centroids/`. Conversion
 helpers write beside their input files, even when run from another directory.

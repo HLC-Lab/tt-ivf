@@ -52,7 +52,7 @@ ENERGY_ROOT="$(realpath "$ENERGY_ROOT")"
 MANIFEST="$ENERGY_ROOT/sessions.csv"
 [[ ! -e "$MANIFEST" ]] || { echo "Refusing to overwrite existing manifest: $MANIFEST" >&2; exit 1; }
 # Check telemetry and host package counters before any device workload.
-PYTHONPATH="$ENERGY_DIR${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_BIN" -c 'from energy_sampling import discover_rapl; from plot_energy_recall import read_tt_power_once; assert discover_rapl(), "Readable host CPU package RAPL counters are required"; read_tt_power_once()'
+PYTHONPATH="$ENERGY_DIR${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_BIN" -c 'from energy_sampling import discover_rapl; from plot_energy_recall import select_tt_power_reader; assert discover_rapl(), "Readable host CPU package RAPL counters are required"; select_tt_power_reader("auto")[0]()'
 printf 'ordinal,grouping,nlist,nprobe,session,searches,queries_per_search,start_utc,end_utc,status,output_dir\n' > "$MANIFEST"
 sha256sum "$BINARY" > "$ENERGY_ROOT/binary.sha256"
 {

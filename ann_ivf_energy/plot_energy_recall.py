@@ -117,13 +117,56 @@ def read_tt_power_once():
         raise RuntimeError(f"tt-smi exited with {result.returncode}: {detail}")
     return (before + after) * 0.5, extract_tt_power_watts(result.stdout), result.stdout
 
+# Tenstorrent kernel-driver hwmon telemetry (tt-kmd >= 1.29). Unlike tt-smi,
+# it stays readable while a TT-Metal process holds the device: tt-smi then
+# fails with "Failed to map bar0_uc". power1_input is in microwatts.
+HWMON_ROOT = Path("/sys/class/hwmon")
+TT_HWMON_NAMES = {"grayskull", "wormhole", "blackhole"}
+
+
+def discover_tt_hwmon(root=HWMON_ROOT):
+    paths = []
+    for directory in sorted(Path(root).glob("hwmon*")):
+        try:
+            name = (directory / "name").read_text().strip()
+        except OSError:
+            continue
+        if name in TT_HWMON_NAMES and (directory / "power1_input").is_file():
+            paths.append(directory / "power1_input")
+    return paths
+
+
+def make_hwmon_reader(paths):
+    """Board power summed over every TT hwmon device, in watts."""
+    def read():
+        before = time.time()
+        microwatts = [int(path.read_text().strip()) for path in paths]
+        after = time.time()
+        if any(value < 0 for value in microwatts):
+            raise ValueError("negative hwmon power")
+        return (before + after) * 0.5, sum(microwatts) / 1e6, ";".join(map(str, microwatts))
+    return read
+
+
+def select_tt_power_reader(source):
+    """Return (reader, description, poll_interval_s) for --tt-power-source."""
+    paths = discover_tt_hwmon() if source in ("auto", "hwmon") else []
+    if paths:
+        return make_hwmon_reader(paths), "hwmon:" + ",".join(map(str, paths)), 0.02
+    if source == "hwmon":
+        raise RuntimeError("No Tenstorrent hwmon power1_input found under /sys/class/hwmon")
+    return read_tt_power_once, "tt-smi", 0.1
+
+
 def read_rapl_energy():
     zones = discover_rapl()
     return sum(float(zone.path.read_text()) for zone in zones) / 1e6 if zones else None
 
 class PowerProfiler:
-    def __init__(self, target, require_host=False):
+    def __init__(self, target, require_host=False, tt_reader=None, tt_interval=0.1):
         self.target = target
+        self.tt_reader = tt_reader or read_tt_power_once
+        self.tt_interval = tt_interval
         self.stop_event = threading.Event()
         self.tt_ready = threading.Event()
         self.host_ready = threading.Event()
@@ -166,13 +209,13 @@ class PowerProfiler:
     def _poll_tt(self):
         while not self.stop_event.is_set():
             try:
-                timestamp, power, output = read_tt_power_once()
+                timestamp, power, output = self.tt_reader()
                 self.last_tt_output = output
                 self.tt_samples.append((timestamp, power))
                 self.tt_ready.set()
             except Exception as error:
                 self.last_tt_error = str(error)
-            self.stop_event.wait(0.1)
+            self.stop_event.wait(self.tt_interval)
 
     def _poll_host(self):
         while not self.stop_event.is_set():
@@ -308,6 +351,18 @@ def main():
     parser.add_argument("--query-grouping", choices=["none", "primary-list", "weighted-union"], default="none")
     parser.add_argument("--grouping-window", type=int, default=0)
     parser.add_argument("--grouping-lookahead", type=int, default=256)
+    parser.add_argument("--fine-schedule", choices=["batch-major", "cluster-major"], default="batch-major",
+                        help="cluster-major: ann_ivf_ttaiss interface (no result staging/chunk blocks)")
+    parser.add_argument("--batch-chunk", type=int, default=32, help="cluster-major query batches per list scan")
+    parser.add_argument("--fine-math-fidelity", choices=["LoFi", "HiFi2", "HiFi3", "HiFi4"], default="HiFi4")
+    parser.add_argument("--coarse-math-fidelity", choices=["LoFi", "HiFi2", "HiFi3", "HiFi4"], default="HiFi4")
+    parser.add_argument("--tt-power-source", choices=["auto", "hwmon", "tt-smi"], default="auto",
+                        help="auto: TT kernel-driver hwmon power1_input when present, else tt-smi")
+    parser.add_argument("--max-tt-gap-s", type=float, default=2.0,
+                        help="fail when TT power samples inside the measurement window are further apart")
+    parser.add_argument("--executable-arg", action="append", default=[], metavar="ARG",
+                        help="extra argument appended verbatim to the TT command (repeat per argument), "
+                             "e.g. --executable-arg=--rerank")
     parser.add_argument("--require-host", action="store_true")
     parser.add_argument("--no-plots", action="store_true")
     parser.add_argument("--executable", default=TT_EXECUTABLE_PATH)
@@ -315,6 +370,10 @@ def main():
     args = parser.parse_args()
     if args.runs <= 0 or not 1 <= args.max_num_queries <= 10000 or not 1 <= args.k <= 32:
         parser.error("runs must be positive; queries must be 1..10000 and k 1..32")
+    if args.batch_chunk <= 0:
+        parser.error("--batch-chunk must be positive")
+    if args.fine_schedule == "batch-major" and (args.fine_math_fidelity != "HiFi4" or args.coarse_math_fidelity != "HiFi4"):
+        parser.error("math fidelity options apply only to --fine-schedule cluster-major")
     if args.cluster_chunk_blocks != 0:
         parser.error("cluster chunking was removed; omit --cluster-chunk-blocks or use 0")
     if args.grouping_window < 0 or args.grouping_window % 32 or args.grouping_lookahead <= 0:
@@ -325,7 +384,8 @@ def main():
 
     if args.target == "tt":
         try:
-            _, preflight_power, preflight_output = read_tt_power_once()
+            tt_reader, tt_source, tt_interval = select_tt_power_reader(args.tt_power_source)
+            _, preflight_power, preflight_output = tt_reader()
         except Exception as error:
             (output_dir / "tt_smi_preflight_error.txt").write_text(
                 f"{error}\n", encoding="utf-8"
@@ -334,14 +394,16 @@ def main():
         (output_dir / "tt_smi_preflight.json").write_text(
             preflight_output, encoding="utf-8"
         )
-        print(f"[Power] tt-smi preflight: {preflight_power:.3f} W")
+        (output_dir / "tt_power_source.txt").write_text(f"{tt_source}\n", encoding="utf-8")
+        print(f"[Power] TT power source: {tt_source}; preflight: {preflight_power:.3f} W")
 
     print(f"\n==========================================================")
     print(f"Running Power Profiler for [{args.target.upper()}]")
     print(f"Dataset: {args.dataset} | NList: {args.nlist} | NProbe: {args.nprobe} | Runs: {args.runs}")
     print(f"==========================================================\n")
 
-    profiler = PowerProfiler(args.target, args.require_host)
+    profiler = (PowerProfiler(args.target, args.require_host, tt_reader, tt_interval) if args.target == "tt"
+                else PowerProfiler(args.target, args.require_host))
     if not profiler.zones:
         print("[Power] Host package counters unavailable; this capture measures device energy only")
     else:
@@ -357,13 +419,19 @@ def main():
             "--k", str(args.k),
             "--max_num_queries", str(args.max_num_queries),
             "--runs", str(args.runs),
-            "--result-staging", args.result_staging,
-            "--cluster-chunk-blocks", str(args.cluster_chunk_blocks),
             "--query-grouping", args.query_grouping,
             "--grouping-window", str(args.grouping_window),
             "--grouping-lookahead", str(args.grouping_lookahead),
             "--energy-events", str(output_dir / "events.csv"),
         ]
+        if args.fine_schedule == "batch-major":
+            cmd += ["--result-staging", args.result_staging,
+                    "--cluster-chunk-blocks", str(args.cluster_chunk_blocks)]
+        else:
+            cmd += ["--batch-chunk", str(args.batch_chunk),
+                    "--fine-math-fidelity", args.fine_math_fidelity,
+                    "--coarse-math-fidelity", args.coarse_math_fidelity]
+        cmd += list(args.executable_arg)
         start_trigger = "ENERGY_MEASUREMENT_START"
         end_trigger = "ENERGY_MEASUREMENT_END"
     else:
@@ -465,6 +533,13 @@ def main():
         tt_times = [t for t, _ in tt_samples]
         if len(tt_times) < 2 or tt_times[0] > search_start_time or tt_times[-1] < search_end_time:
             raise SystemExit("TT samples do not bracket the C++ measurement window")
+        # A silently failing reader leaves only the idle bracket samples; the
+        # interpolated "energy" would then be idle power x duration.
+        inside = [search_start_time] + [t for t in tt_times if search_start_time < t < search_end_time] + [search_end_time]
+        largest_gap = max(b - a for a, b in zip(inside, inside[1:]))
+        if largest_gap > args.max_tt_gap_s:
+            raise SystemExit(f"TT power samples have a {largest_gap:.2f} s gap inside the measurement window "
+                             f"(limit {args.max_tt_gap_s} s); last TT error: {profiler.last_tt_error}")
 
     if args.target == "tt" and not tt_samples:
         diagnostic = profiler.last_tt_error or "tt-smi returned no usable samples"

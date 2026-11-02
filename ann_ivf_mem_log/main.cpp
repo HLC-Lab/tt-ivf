@@ -30,6 +30,7 @@ struct Config {
     uint32_t runs = 1;
     std::string mem_log;
     bool explicit_mem_log = false;
+    std::string results_output;
     std::string result_staging = "dram";
     uint32_t prefetch_reader = 2;
     ivf_mem_log::GroupingConfig query_grouping;
@@ -123,6 +124,7 @@ int main(int argc, char** argv) {
                 cfg.explicit_mem_log = true;
             }
             else if (arg == "--result-staging" || arg == "--result_staging") cfg.result_staging = option_value(i, argc, argv);
+            else if (arg == "--results-output") cfg.results_output = option_value(i, argc, argv);
             else if (arg == "--query-grouping") cfg.query_grouping.mode = option_value(i, argc, argv);
             else if (arg == "--grouping-window") cfg.query_grouping.window = unsigned_option(i, argc, argv);
             else if (arg == "--grouping-lookahead") cfg.query_grouping.lookahead = unsigned_option(i, argc, argv);
@@ -247,6 +249,20 @@ int main(int argc, char** argv) {
 
         auto& res_scores = results.first;
         auto& res_indices = results.second;
+        if (!cfg.results_output.empty()) {
+            // Final run, original query order; written outside the timed interval.
+            std::ofstream out(cfg.results_output);
+            if (!out) throw std::runtime_error("Could not open result dump: " + cfg.results_output);
+            const uint32_t per_query = res_indices.size() / max_queries_to_run;
+            out << "query,rank,index,score\n" << std::setprecision(9);
+            for (uint32_t q = 0; q < max_queries_to_run; ++q)
+                for (uint32_t rank = 0; rank < per_query; ++rank)
+                    out << q << ',' << rank << ',' << res_indices[q * per_query + rank] << ','
+                        << res_scores[q * per_query + rank] << '\n';
+            out.close();
+            if (!out) throw std::runtime_error("Could not finish writing result dump: " + cfg.results_output);
+            std::cout << "[Results] Final-run neighbors saved to " << cfg.results_output << std::endl;
+        }
 
         double avg_total_latency_us = total_latency_us / cfg.runs;
         double avg_lat = avg_total_latency_us / (max_queries_to_run / 32.0); // equivalent avg per 32-batch

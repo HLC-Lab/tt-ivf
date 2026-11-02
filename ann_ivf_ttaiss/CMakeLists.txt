@@ -1,0 +1,73 @@
+# ann_ivf_ttaiss/CMakeLists.txt
+
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    cmake_minimum_required(VERSION 3.20)
+    project(ann_ivf_ttaiss LANGUAGES CXX)
+endif()
+option(IVF_TTAISS_HOST_TESTS_ONLY "Build portable schedule/kernel lifecycle checks without Metalium" OFF)
+if(IVF_TTAISS_HOST_TESTS_ONLY)
+    enable_testing()
+    foreach(test_name IN ITEMS benchmark_input query_grouping cluster_schedule index_build gather_schedule rerank)
+        add_executable(ann_ivf_ttaiss_${test_name}_test tests/${test_name}_test.cpp)
+        target_compile_features(ann_ivf_ttaiss_${test_name}_test PRIVATE cxx_std_20)
+        target_compile_options(ann_ivf_ttaiss_${test_name}_test PRIVATE -Wall -Wextra -Werror)
+        add_test(NAME ivf_ttaiss_${test_name} COMMAND ann_ivf_ttaiss_${test_name}_test)
+    endforeach()
+    find_package(Threads REQUIRED)
+    target_link_libraries(ann_ivf_ttaiss_index_build_test PRIVATE Threads::Threads)
+    target_link_libraries(ann_ivf_ttaiss_rerank_test PRIVATE Threads::Threads)
+    set(KERNEL_MODEL_INCLUDES "${CMAKE_CURRENT_BINARY_DIR}/kernel_model_includes")
+    file(MAKE_DIRECTORY "${KERNEL_MODEL_INCLUDES}/compute_kernel_api" "${KERNEL_MODEL_INCLUDES}/tools/profiler"
+        "${KERNEL_MODEL_INCLUDES}/api/dataflow")
+    file(WRITE "${KERNEL_MODEL_INCLUDES}/api/dataflow/dataflow_api.h" "#pragma once\n")
+    file(WRITE "${KERNEL_MODEL_INCLUDES}/compute_kernel_api.h" "#pragma once\n")
+    file(WRITE "${KERNEL_MODEL_INCLUDES}/tools/profiler/kernel_profiler.hpp" "#pragma once\n#define DeviceZoneScopedN(name)\n")
+    foreach(api matmul tile_move_copy transpose_wh reconfig_data_format pack eltwise_binary reduce)
+        file(WRITE "${KERNEL_MODEL_INCLUDES}/compute_kernel_api/${api}.h" "#pragma once\n")
+    endforeach()
+    add_executable(ann_ivf_ttaiss_coarse_state_test tests/coarse_state_test.cpp)
+    target_compile_features(ann_ivf_ttaiss_coarse_state_test PRIVATE cxx_std_20)
+    target_compile_options(ann_ivf_ttaiss_coarse_state_test PRIVATE -Wall -Wextra -Werror)
+    target_include_directories(ann_ivf_ttaiss_coarse_state_test PRIVATE "${KERNEL_MODEL_INCLUDES}")
+    add_test(NAME ivf_ttaiss_coarse_state COMMAND ann_ivf_ttaiss_coarse_state_test)
+    add_executable(ann_ivf_ttaiss_coarse_state_top64_test tests/coarse_state_test.cpp)
+    target_compile_features(ann_ivf_ttaiss_coarse_state_top64_test PRIVATE cxx_std_20)
+    target_compile_options(ann_ivf_ttaiss_coarse_state_top64_test PRIVATE -Wall -Wextra -Werror)
+    target_compile_definitions(ann_ivf_ttaiss_coarse_state_top64_test PRIVATE COARSE_KT=2)
+    target_include_directories(ann_ivf_ttaiss_coarse_state_top64_test PRIVATE "${KERNEL_MODEL_INCLUDES}")
+    add_test(NAME ivf_ttaiss_coarse_state_top64 COMMAND ann_ivf_ttaiss_coarse_state_top64_test)
+    add_executable(ann_ivf_ttaiss_scan_state_test tests/scan_state_test.cpp)
+    target_compile_features(ann_ivf_ttaiss_scan_state_test PRIVATE cxx_std_20)
+    # Device kernels cast 32-bit L1 addresses to pointers; the model maps L1 low.
+    target_compile_options(ann_ivf_ttaiss_scan_state_test PRIVATE -Wall -Wextra -Werror -Wno-int-to-pointer-cast)
+    target_include_directories(ann_ivf_ttaiss_scan_state_test PRIVATE "${KERNEL_MODEL_INCLUDES}")
+    add_test(NAME ivf_ttaiss_scan_state COMMAND ann_ivf_ttaiss_scan_state_test)
+    # Same model with the threshold rank of k = 10 (no re-ranking).
+    add_executable(ann_ivf_ttaiss_scan_state_rank9_test tests/scan_state_test.cpp)
+    target_compile_features(ann_ivf_ttaiss_scan_state_rank9_test PRIVATE cxx_std_20)
+    target_compile_definitions(ann_ivf_ttaiss_scan_state_rank9_test PRIVATE SCAN_THRESHOLD_RANK=9)
+    target_compile_options(ann_ivf_ttaiss_scan_state_rank9_test PRIVATE -Wall -Wextra -Werror -Wno-int-to-pointer-cast)
+    target_include_directories(ann_ivf_ttaiss_scan_state_rank9_test PRIVATE "${KERNEL_MODEL_INCLUDES}")
+    add_test(NAME ivf_ttaiss_scan_state_rank9 COMMAND ann_ivf_ttaiss_scan_state_rank9_test)
+    add_executable(ann_ivf_ttaiss_merge_gather_test tests/merge_gather_test.cpp)
+    target_compile_features(ann_ivf_ttaiss_merge_gather_test PRIVATE cxx_std_20)
+    target_compile_options(ann_ivf_ttaiss_merge_gather_test PRIVATE -Wall -Wextra -Werror -Wno-int-to-pointer-cast)
+    target_include_directories(ann_ivf_ttaiss_merge_gather_test PRIVATE "${KERNEL_MODEL_INCLUDES}")
+    add_test(NAME ivf_ttaiss_merge_gather COMMAND ann_ivf_ttaiss_merge_gather_test)
+    return()
+endif()
+
+add_executable(ann_ivf_ttaiss)
+target_compile_features(ann_ivf_ttaiss PRIVATE cxx_std_20)
+target_sources(
+    ann_ivf_ttaiss
+    PRIVATE
+        main.cpp
+        ivf_tt.cpp
+)
+
+if(NOT TARGET TT::Metalium)
+    find_package(TT-Metalium REQUIRED)
+endif()
+
+target_link_libraries(ann_ivf_ttaiss PRIVATE TT::Metalium)

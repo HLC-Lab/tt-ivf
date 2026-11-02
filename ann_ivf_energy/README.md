@@ -134,6 +134,24 @@ interval. Mode order alternates between sessions. `CONFIGURATIONS` contains
 `ENERGY_ROOT` for each experiment. `BINARY` may point to your existing `build`
 instead of `build_Release` executable.
 
+TT board power source (`--tt-power-source`, default `auto`):
+
+- `auto` reads the Tenstorrent kernel driver's hwmon `power1_input`
+  (`/sys/class/hwmon/hwmon*/` named `wormhole`, `blackhole` or `grayskull`;
+  microwatts, whole-watt steps) at about 50 Hz. If no such device exists, it
+  falls back to `tt-smi`.
+- `tt-smi` cannot read telemetry while a TT-Metal process holds the device:
+  on node117 with tt-kmd 2.5.0 it fails with `Failed to map bar0_uc`. Earlier
+  captures that used `tt-smi` may therefore contain only the idle samples
+  before and after the workload.
+- The sampler now stops a session when TT samples inside the measurement
+  window are more than `--max-tt-gap-s` apart (default 2 s).
+- Each session records its source in `tt_power_source.txt`.
+
+`--executable-arg ARG` (repeatable) appends `ARG` verbatim to the TT command,
+after the generated options. `ann_ivf_ttaiss/run_energy_comparison.sh`
+uses it to pass `--rerank`.
+
 Sampling begins before device/index creation. Exact C++ timestamps are retained
 in `events.csv`; `sampler_events.csv` records process/stdout arrival times for
 auditing. TT board power is integrated with interpolated boundaries; host

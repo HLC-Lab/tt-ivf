@@ -1,13 +1,13 @@
 # tt-ann-ivf
 
-Three ANN IVF experiments for Tenstorrent Wormhole, with reproducible timing,
-query grouping, device profiling and energy analysis.
+Approximate nearest-neighbor (IVF-Flat) search on a Tenstorrent Wormhole n150,
+with reproducible timing, validation and energy measurement.
 
 | Executable | Purpose |
 |---|---|
-| `ann_ivf_mem_log` | Whole-list search, grouping comparison and stage/transfer logging |
-| `ann_ivf_energy` | Initialization/search markers for external TT power and host RAPL sampling |
-| `ann_ivf_similarity_partitioned` | Independent partitions, direct/relay readers and Tracy device zones |
+| `ann_ivf_ttaiss` | **TTAISS**, the final implementation: queries grouped by the lists they select, each list read once per search, query tiles built on the device, and a two-pass search that skips hopeless top-k updates. Exact per-query IVF results, optional FP32 re-ranking |
+| `ann_ivf_mem_log` | Earlier batch-based search (each 32-query batch scans the union of its lists), with stage and transfer logging; used as a baseline |
+| `ann_ivf_energy` | Energy workload of the batch-based search, with initialization/search markers for TT power and host RAPL sampling; also hosts the shared energy sampler and analyzer |
 
 The project builds and runs against **its own pinned TT-Metal** in
 `third_party/tt-metal` (git-ignored). `tt_metal.lock.json` records the exact
@@ -20,9 +20,10 @@ The optional FAISS baseline uses IVF scalar quantization with fp16 vectors.
 
 ```text
 tt-ann-ivf/
-├── ann_ivf_mem_log/                 # sources, kernels, tests, plotting scripts
-├── ann_ivf_energy/                  # plus run_tt_energy.sh, sampler/analysis, FAISS baseline
-├── ann_ivf_similarity_partitioned/  # sources, kernels, tests, sweep/profiling scripts
+├── ann_ivf_ttaiss/                  # final implementation: sources, kernels, tests, comparison/energy scripts
+├── ann_ivf_mem_log/                 # batch-based baseline: sources, kernels, tests, plotting scripts
+├── ann_ivf_energy/                  # batch-based energy workload, sampler/analysis, FAISS baseline
+├── docs/figures/                    # TikZ overview figures of TTAISS
 ├── common/
 ├── data/                            # datasets/ and centroids/ (assets ignored)
 ├── results/                         # generated measurements (ignored)
@@ -63,8 +64,8 @@ locked revision, pass it explicitly: `source env.sh /path/to/tt-metal`.
 headers; `TT_METAL_KERNEL_PATH` points here, including energy runs with a
 different CWD.
 
-All three experiments are built by default. To rebuild one, use
-`bash build.sh ann_ivf_mem_log`. `JOBS=8` changes build parallelism. The first
+All three executables are built by default. To rebuild one, use
+`bash build.sh ann_ivf_ttaiss`. `JOBS=8` changes build parallelism. The first
 build records the runtime's resolved headers, compile options and link
 libraries under `.runtime/` (`prepare_runtime.sh`); rerun it after rebuilding
 TT-Metal with different options. The compiler is taken from the runtime build.
@@ -95,7 +96,7 @@ and `data/centroids/centroids-glove-100-angular-512.bin`. `--dataset` remains
 folders. HDF5 conversion writes beside its input; FAISS writes trained centroids
 to the centroid folder. The link helper refuses conflicting destinations.
 
-The conversion scripts are shared by all three implementations:
+The conversion scripts are shared by all executables:
 
 ```bash
 python3 tools/export_hdf5.py data/datasets/glove-100-angular.hdf5
@@ -106,25 +107,29 @@ See [data/README.md](data/README.md) for the full layout.
 
 ## Run
 
-Use 10,000 queries and five measured runs for the recorded throughput comparison:
+Use 10,000 queries and five measured runs for throughput measurements:
 
 ```bash
-bash run.sh ann_ivf_mem_log --dataset glove-100-angular --nlist 512 \
-  --nprobe 16 --k 10 --runs 5 --max_num_queries 10000 \
-  --query-grouping weighted-union
+bash run.sh ann_ivf_ttaiss --dataset glove-100-angular --nlist 512 \
+  --nprobe 64 --k 10 --runs 5 --max_num_queries 10000          # add --rerank for FP32 re-ranking
 
-RUNS=5 QUERIES=10000 \
-  bash ann_ivf_similarity_partitioned/run_timing_sweep.sh
+NPROBES="32 48 56 64" RUNS=5 QUERIES=10000 \
+  bash ann_ivf_ttaiss/run_gather_comparison.sh                 # validated against an exact per-query search
+
+bash run.sh ann_ivf_mem_log --dataset glove-100-angular --nlist 512 \
+  --nprobe 16 --k 10 --runs 5 --max_num_queries 10000 --query-grouping weighted-union
 ```
 
 Default outputs are under `results/`, grouped by experiment. `ANN_RESULTS_DIR`
 selects another root; explicit output arguments retain their exact paths.
-Run from this root after sourcing `env.sh`. Experiment READMEs document
-validation, grouping modes, relay comparisons and Tracy capture/plots.
+Run from this root after sourcing `env.sh`. The executable READMEs document
+validation, grouping modes and profiling.
 Profiling changes timing; use unprofiled runs for throughput claims.
 
-For energy, install the compatible `tt-smi` telemetry tool and ensure CPU
-package RAPL counters are readable:
+For energy, the sampler reads TT board power from the kernel driver's hwmon
+interface and needs readable CPU package RAPL counters. TTAISS is compared
+with the batch-based search at matched recall by
+`ann_ivf_ttaiss/run_energy_comparison.sh`; a batch-based sweep alone runs as:
 
 ```bash
 ivf_energy_compare_dir="$PWD/results/energy_raw/grouping_$(date -u +%Y%m%dT%H%M%SZ)_pid$$"
@@ -137,7 +142,7 @@ ENERGY_ROOT="$ivf_energy_compare_dir" bash ann_ivf_energy/run_tt_energy.sh
 Use a fresh output directory. The sampler selects one counter per package
 prefix X (`0-die-*`, `1-die-*`); it does not sum duplicate die readings.
 Reports distinguish complete initialization/search energy from search-only
-energy. No final energy results are bundled yet.
+energy. Recorded energy results are in `docs/RESULTS.md`.
 
 ## Verification and recorded results
 

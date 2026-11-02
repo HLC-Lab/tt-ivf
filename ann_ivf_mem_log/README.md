@@ -110,8 +110,7 @@ simultaneous DRAM page pairs in flight.
 
 ## Group similar queries into batches of 32
 
-Enable the same host grouping heuristic used in
-`ann_ivf_similarity_partitioned` with `--query-grouping weighted-union`.
+Enable the host grouping heuristic with `--query-grouping weighted-union`.
 The default is `none` for baseline comparisons; `primary-list` selects a
 simpler lexicographic sort of each query's ranked list IDs.
 

@@ -1,0 +1,25 @@
+% Standalone preview of ttaiss_pipeline.tex (figures + parallelism text).
+% Build: pdflatex preview_ttaiss_pipeline.tex   (in this folder)
+% The section tags print as "??" here because the thesis labels are not defined.
+\documentclass[11pt]{article}
+\usepackage[margin=2cm]{geometry}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{positioning,calc,arrows.meta,decorations.pathreplacing}
+
+% Stand-ins for the thesis chapter styles (replace with the real ones if you have them).
+\definecolor{hostc}{RGB}{214,228,240}
+\definecolor{devc}{RGB}{226,236,214}
+\tikzset{
+  box/.style={draw,rounded corners=2pt,align=center,font=\small,inner sep=3pt},
+  hbox/.style={box,fill=white},
+  dbox/.style={box,fill=white,thick},
+  mbox/.style={box,fill=gray!10,dashed},
+  sectag/.style={font=\scriptsize,text=gray,inner sep=1pt},
+  darr/.style={-{Stealth[length=2mm]},thick}}
+
+\begin{document}
+\input{ttaiss_pipeline}
+\end{document}

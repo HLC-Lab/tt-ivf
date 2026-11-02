@@ -150,6 +150,58 @@ class EnergyAnalysisTests(unittest.TestCase):
         self.assertEqual(result.samples_in_window, 0)
 
     def test_sampler_runs_old_energy_interface_and_brackets_events(self):
+        self._run_fake_sampler(
+            "assert sys.argv[sys.argv.index('--result-staging')+1] == 'dram'\n"
+            "assert '--batch-chunk' not in sys.argv\n", [])
+
+    def test_sampler_runs_cluster_major_interface(self):
+        self._run_fake_sampler(
+            "assert '--result-staging' not in sys.argv and '--cluster-chunk-blocks' not in sys.argv\n"
+            "assert sys.argv[sys.argv.index('--batch-chunk')+1] == '16'\n"
+            "assert sys.argv[sys.argv.index('--fine-math-fidelity')+1] == 'HiFi2'\n"
+            "assert sys.argv[sys.argv.index('--coarse-math-fidelity')+1] == 'HiFi4'\n",
+            ['--fine-schedule', 'cluster-major', '--batch-chunk', '16', '--fine-math-fidelity', 'HiFi2'])
+
+    def test_hwmon_power_source(self):
+        import plot_energy_recall as sampler
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            for index, (device, microwatts) in enumerate((("k10temp", None), ("wormhole", 37000000))):
+                directory = root / f"hwmon{index}"
+                directory.mkdir()
+                (directory / "name").write_text(device + "\n")
+                if microwatts is not None:
+                    (directory / "power1_input").write_text(f"{microwatts}\n")
+            paths = sampler.discover_tt_hwmon(root)
+            self.assertEqual([path.parent.name for path in paths], ["hwmon1"])
+            _, watts, _ = sampler.make_hwmon_reader(paths)()
+            self.assertAlmostEqual(watts, 37.0)
+            with patch.object(sampler, "discover_tt_hwmon", return_value=[]):
+                self.assertIs(sampler.select_tt_power_reader("auto")[0], sampler.read_tt_power_once)
+                with self.assertRaises(RuntimeError):
+                    sampler.select_tt_power_reader("hwmon")
+
+    def test_sampler_rejects_idle_bracket_only_tt_samples(self):
+        # A reader that fails while the workload holds the device (tt-smi:
+        # "Failed to map bar0_uc") must not be integrated as idle power.
+        import time
+        state = {"calls": 0}
+        def flaky():
+            state["calls"] += 1
+            if 3 <= state["calls"] <= 40:
+                raise RuntimeError("Failed to map bar0_uc")
+            return time.time(), 11.0, "{}"
+        with self.assertRaises(SystemExit) as raised:
+            self._run_fake_sampler("", ["--max-tt-gap-s", "0.1"], tt_reader=flaky)
+        self.assertIn("gap", str(raised.exception))
+
+    def test_sampler_passes_executable_args_verbatim(self):
+        self._run_fake_sampler(
+            "assert sys.argv[-3:] == ['--rerank', '--first-pass-lists', 'a b']\n",
+            ['--fine-schedule', 'cluster-major', '--executable-arg=--rerank', '--executable-arg=--first-pass-lists',
+             '--executable-arg', 'a b'])
+
+    def _run_fake_sampler(self, interface_checks, extra_argv, tt_reader=None):
         import time
         import plot_energy_recall as sampler
         with tempfile.TemporaryDirectory() as name:
@@ -171,7 +223,7 @@ for run in (1,2):
 record('measurement_end')
 assert '--mem_log' not in sys.argv
 assert '--query-grouping' in sys.argv
-path=sys.argv[sys.argv.index('--energy-events')+1]
+''' + interface_checks + '''path=sys.argv[sys.argv.index('--energy-events')+1]
 with open(path,'w',newline='') as f:
     writer=csv.writer(f)
     writer.writerow(['Event','Timestamp'])
@@ -189,9 +241,11 @@ print('[Energy] ENERGY_MEASUREMENT_END',flush=True)
             argv = ['plot_energy_recall.py', '--executable', str(executable), '--nlist', '512',
                     '--nprobe', '16', '--runs', '2', '--max-num-queries', '100',
                     '--query-grouping', 'weighted-union', '--require-host', '--no-plots',
-                    '--output-dir', str(root / 'output')]
+                    '--output-dir', str(root / 'output')] + extra_argv
+            reader = tt_reader or (lambda: (time.time(), 7., '{}'))
             with patch.object(sys, 'argv', argv), patch.object(sampler, 'discover_rapl', return_value=zones), \
-                 patch.object(sampler, 'read_tt_power_once', side_effect=lambda: (time.time(), 7., '{}')), \
+                 patch.object(sampler, 'discover_tt_hwmon', return_value=[]), \
+                 patch.object(sampler, 'read_tt_power_once', side_effect=reader), \
                  contextlib.redirect_stdout(io.StringIO()):
                 sampler.main()
             directory = root / 'output'

@@ -2,8 +2,11 @@
 
 ## Scope and build
 
-Keep exactly `ann_ivf_mem_log`, `ann_ivf_energy` and
-`ann_ivf_similarity_partitioned`. Keep runtime sources and libraries in
+Keep exactly `ann_ivf_ttaiss` (TTAISS, the final implementation described in
+the thesis), `ann_ivf_mem_log` (the batch-based baseline) and `ann_ivf_energy`
+(its energy workload and the shared energy sampler/analyzer). Earlier
+experiments were removed; `docs/RESULTS.md` keeps their recorded results under
+the names used at the time. Keep runtime sources and libraries in
 `third_party/tt-metal` (git-ignored); do not vendor a second dependency graph.
 
 Read `README.md`, `tt_metal.lock.json` and `docs/RESULTS.md` before changing
@@ -28,7 +31,7 @@ export sets: they caused duplicate fmt/xtl exports.
 Keep tool argument handling safe for spaces: subprocess argument lists,
 quoted shell paths, no flattening of paired compiler/link flags or reordering
 of libraries. `export_hdf5.py` and `convert_centroids.py` binary formats are
-read by all three executables; failed conversions must abort the run.
+read by all executables; failed conversions must abort the run.
 
 ## Correctness and code changes
 
@@ -44,10 +47,29 @@ read by all three executables; failed conversions must abort the run.
 - Preserve paired vector/ID ordering, CB reserve/publish/consume ordering,
   transaction completion before buffer reuse, and payload completion before
   semaphore notification.
-- Partitioned experiment: include idle workers in control flow; handle
-  zero-work partitions, short lists, partial last batches and out-of-order read
-  completion. Multicast only to an exact physical receiver rectangle with the
-  leader outside it. Keep profiled and unprofiled paths operationally identical.
+- TTAISS (`ann_ivf_ttaiss`): each query is searched only in its own nprobe
+  lists, so results are validated against an exact per-query IVF search
+  (`validate_gather.py`: list membership, ranked scores within one BF16 ulp,
+  rescored IDs), not against mem_log. Compare speed with the batch-based
+  search at equal recall.
+  - Scan: every (non-empty list, query block) pair has exactly one partial
+    slot. Multi-tile CB reservations must not wrap the CB end (whole-chunk
+    query units). Fill the champion ring only from the resident sentinel
+    tiles; `initialize_champion` is valid only on an empty CB. Host CB
+    capacities, `scan_l1` accounting and the script layout must change
+    together.
+  - Query blocks are built in the scan reader from a per-block query-ID
+    table; row copies are 32-byte aligned face segments, unused rows are
+    zero-filled, and the ID scratch CB is part of `scan_l1` accounting.
+  - Merge: every group of 32 queries has exactly one merge owner. Row gathers
+    must stay 32-byte aligned face segments, and missing partials must be
+    sentinel rows.
+  - Two passes: the skip test may only drop pairs whose scores cannot beat the
+    query's bound; the bound rank is a compile-time argument (k, or 32 with
+    `--rerank`), and score windows must not run past the CB end.
+  - nprobe > 32 uses the exact coarse top-64: the second sort needs its own
+    DST section (PACK reads DST only after the MATH section), and all 64
+    lanes are validated before selecting nprobe.
 - Preserve int32 IDs, tail masks and sentinel filtering. BF16 score ties permit
   alternate IDs; score/count agreement does not independently validate those IDs.
 - Deprecation warnings in this pinned runtime are not evidence of a failed build.
@@ -55,7 +77,14 @@ read by all three executables; failed conversions must abort the run.
 ## Energy measurement
 
 `ann_ivf_energy` omits recall checks, readback and transfer logging; do not
-import the mem-log executable or add timed result dumping. The complete
+import the mem-log executable or add timed result dumping. The same contract
+applies to `ann_ivf_ttaiss --energy-events`. Compare the two only through
+`ann_ivf_ttaiss/run_energy_comparison.sh`, which pairs them by recall level:
+alternating sessions, per-implementation manifests, and the unchanged
+analyzer. Exception: with `--rerank`, the `--energy-events` workload of
+`ann_ivf_ttaiss` reads its results back and re-ranks them inside the window,
+because re-ranking produces its results; report such levels as including the
+readback. The complete
 interval includes device/index creation and searches; per-search intervals
 exclude them. Do not add in-window warmup or silently move interval boundaries.
 Select one RAPL package counter per prefix (`0-die-*`, `1-die-*`), never sum
@@ -69,8 +98,11 @@ Run the portable CMake/CTest checks (`-DANN_HOST_TESTS_ONLY=ON`) and
 `tools/test_project_setup.py` after changes to shared build or protocol code.
 Host shims test lifecycle/protocol rules, not Tensix numerics, real race
 timing or physical bandwidth. Hardware changes require a matching build,
-device JIT, validation (`ann_ivf_similarity_partitioned/run_validation.sh`)
-and unprofiled timing on Wormhole.
+device JIT, validation (for TTAISS, `ann_ivf_ttaiss/run_gather_comparison.sh`,
+which checks every run against the exact per-query search; for the
+batch-based search, which has no per-rank validator in this repository, the
+recall against the ground truth at unchanged settings) and unprofiled
+timing on Wormhole with no concurrent host load.
 
 Benchmark reports exclude warmup. Use 10,000 queries, five measured repetitions
 and medians for timing comparisons. Detail timings are included in their
